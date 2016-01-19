@@ -1,0 +1,17 @@
+<h1>VauDUO - 2 axes <a href="http://en.wikipedia.org/wiki/Do_it_yourself">DIY</a>, <a href="http://en.wikipedia.org/wiki/Open-source_hardware">OSH</a> & <a href="http://en.wikipedia.org/wiki/Open-source_software">OSS</a> brushless gimbal controller</h1>
+<p><b>FEATURES</b>
+<ul>
+<li>2 stabilized axes;</li>
+<li>I2C interface for IMU connection;</li>
+<li>4-channel RC input;</li>
+<li>ARM Cortex M3 microcontroller unit;</li>
+<li>Full speed USB2.0 interface;</li>
+<li>16Mb external flash;</li>
+<li>SWD interface for debugging;</li>
+<li>USART interface;</li>
+</ul></p>
+<p><b>VauDUO to do list:</b>
+<ul>
+<li>Change +5V linear voltage regulator to +5V step-down DC-DC regulator;</li>
+</ul>
+</p>
