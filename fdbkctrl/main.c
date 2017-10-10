@@ -23,12 +23,6 @@
 
 #include "ad5761r.h"
 
-/* ADC timeout in ms. */
-#define ADC_WAIT_TIMEOUT_MS         10
-
-/* Buffer size of the ADC subsystem. */
-#define ADC_BUF_DEPTH               32
-
 /* Available streaming channels. */
 #define STREAMING_CHANNEL_FE        0x00
 #define STREAMING_CHANNEL_CE        0x01
@@ -37,6 +31,14 @@
 #define STREAMING_CHANNEL_B         0x04
 #define STREAMING_CHANNEL_C         0x05
 #define STREAMING_CHANNEL_D         0x06
+
+#define STREAMING_COUNTER_VALUE     8
+
+/* ADC timeout in ms. */
+#define ADC_WAIT_TIMEOUT_MS         10
+
+/* Buffer size of the ADC subsystem. */
+#define ADC_BUF_DEPTH               32
 
 /* ADC1_2 conversion group. */
 #define ADC_GRP1_NUM_CHANNELS       0x04
@@ -47,16 +49,6 @@
 #define TELEMETRY_MSG_USB_HDR_SIZE  0x04
 #define TELEMETRY_MSG_COM_HDR_SIZE  0x02
 #define TELEMETRY_LOOP_DIV          5
-
-#define STREAMING_COUNTER_VALUE     8
-
-/* Z actuator stepping limits. */
-#define STEP_LIMIT_MAX              16
-#define STEP_LIMIT_MIN              -STEP_LIMIT_MAX
-
-/* Z actuator position limits. */
-#define ZPOS_LIMIT_MIN              0
-#define ZPOS_LIMIT_MAX              1365
 
 /* SmartMDC Modes */
 #define MODE_STREAMING              0
@@ -86,9 +78,8 @@ typedef struct tagPID {
 /* PID controller structure. */
 typedef struct tagPIDCtrl {
   PID pid;            /* PID gains.              */
+  int32_t integral;   /* Integral value.    */
   int16_t prevErr;    /* Previous process error. */
-  int16_t prevSpeed;  /* Previous speed.         */
-  int16_t prevPos;    /* Previous position.      */
 } __attribute__((packed)) PIDCtrl, *PPIDCtrl;
 
 typedef struct tagPWMOutputStruct {
@@ -97,13 +88,13 @@ typedef struct tagPWMOutputStruct {
 } __attribute__((packed)) PWMOutputStruct, *PPWMOutputStruct;
 
 /*
- * SPI1 configuration (9MHz, 8-bit, CPOL=0, CPHA=1, MSb first).
+ * SPI1 configuration (4M5Hz, 8-bit, CPOL=0, CPHA=1, MSb first).
  */
 static const SPIConfig spicfg1 = {
   end_cb: NULL,             /* Operation complete callback        */
   ssport: GPIOA,            /* The chip select line port.         */
   sspad:  GPIOA_SPI1_NSS,   /* The chip select line pad number.   */
-  cr1:    SPI_CR1_BR_0 |    /* CR1 register initialization data.  */
+  cr1:    SPI_CR1_BR_1 |    /* CR1 register initialization data.  */
           SPI_CR1_CPHA,
   cr2:    SPI_CR2_DS_2 |    /* CR2 register initialization data.  */
           SPI_CR2_DS_1 |
@@ -127,9 +118,8 @@ static PIDCtrl pidc = {
     0.0f, /* I gain.            */
     0.0f  /* D gain.            */
   },
-  0,      /* Previous error.    */
-  0,      /* Previous speed.    */
-  0       /* Previous position. */
+  0,      /* Integral value.    */
+  0       /* Previous error.    */
 };
 
 /* PID controller enabled flag. */
@@ -179,7 +169,7 @@ static void adccallbackCBAD(ADCDriver *adcp, adcsample_t *buffer, size_t n) {
 
 /*
  * ADC1_2 conversion group.
- * Mode:      Continuous, 128 samples of 4 channels, SW triggered,
+ * Mode:      Continuous, 32 samples of 4 channels each, SW triggered,
               (72 000 000 / 4) / (601.5 + 12.5) / 2 = 14658 sps (7 kHz bw).
  * Channels:  ADC1_CH3-(C), ADC2_CH1-(B), ADC1_CH4-(A), ADC2_CH2-(D).
  */
@@ -241,6 +231,7 @@ static THD_FUNCTION(Blinker, arg) {
  */
 static void pidApply(PIDCtrl *pidc, int16_t pv, int16_t sp) {
   int16_t err;
+  int16_t drv;
 
   /* Calculate process error. */
   if (fPIDInvertErr) {
@@ -248,22 +239,29 @@ static void pidApply(PIDCtrl *pidc, int16_t pv, int16_t sp) {
   } else {
     err = sp - pv;
   }
-  /* If there is a distance to move then move in small steps. */
-  float32_t step = CONSTRAIN(err * pidc->pid.I, STEP_LIMIT_MIN, STEP_LIMIT_MAX);
-  /* Calculate speed of the actuator. */
-  int16_t speed = err - pidc->prevErr;
-  /* Update step proportional to the speed. */
-  step += speed * pidc->pid.P;
-  /* Account for the acceleration. */
-  step += (speed - pidc->prevSpeed) * pidc->pid.D;
-  /* Calculate new position. */
-  int16_t pos = CONSTRAIN(pidc->prevPos + (int16_t)step, ZPOS_LIMIT_MIN, ZPOS_LIMIT_MAX);
+
+  /* Integral update. */
+  pidc->integral += err;
+
+  /* Wind-up guard. */
+  pidc->integral = CONSTRAIN(pidc->integral, 0, 65536000);
+
+  /* Derivative calculation.  */
+  drv = err - pidc->prevErr;
+
   /* Update PID structure. */
-  pidc->prevErr   = err;
-  pidc->prevSpeed = speed;
-  pidc->prevPos   = pos;
+  pidc->prevErr = err;
+
+  /* Calculate the new actuator position. */
+  /* NOTE: dt value is embedded in I and D coefficients. */
+  int32_t pos =
+    (float32_t)(err * pidc->pid.P) +
+    (float32_t)(pidc->integral * pidc->pid.I) +
+    (float32_t)(drv * pidc->pid.D);
+
   /* Update actuator. */
-  //ad5761rSetData(pos);
+  pos = CONSTRAIN(pos, 0, 65535);
+  ad5761rSetData(pos);
 }
 
 /**
@@ -523,7 +521,7 @@ static void commandProcessUSB(void)
     if (msgUSB.data_size == sizeof(fPIDEnabled)) {
       chnRead(pChnUSB, (uint8_t *)&fPIDEnabled, msgUSB.data_size);
       if (fPIDEnabled) {
-        pidc.prevPos = ad5761rGetData();
+        pidc.integral = ad5761rGetData() / pidc.pid.I;
         palSetPad(GPIOB, GPIOB_LED_B);
       } else {
         palClearPad(GPIOB, GPIOB_LED_B);
