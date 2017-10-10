@@ -521,7 +521,11 @@ static void commandProcessUSB(void)
     if (msgUSB.data_size == sizeof(fPIDEnabled)) {
       chnRead(pChnUSB, (uint8_t *)&fPIDEnabled, msgUSB.data_size);
       if (fPIDEnabled) {
-        pidc.integral = ad5761rGetData() / pidc.pid.I;
+        if (pidc.pid.I == 0.0f) {
+          pidc.integral = 0x00000000;
+        } else {
+          pidc.integral = ad5761rGetData() / pidc.pid.I;
+        }
         palSetPad(GPIOB, GPIOB_LED_B);
       } else {
         palClearPad(GPIOB, GPIOB_LED_B);
@@ -622,10 +626,27 @@ static void commandProcessUSB(void)
   case 'c': /* Sends value of the FBK actuator (0x63 hex; 99 dec). */
     if (msgUSB.data_size == 0) {
       msgUSB.data_size = sizeof(utmp16);
-      //utmp16 = ad5504GetData();
-      utmp16 = 0x0000;
+      utmp16 = ad5761rGetData();
       chnWrite(pChnUSB, (const uint8_t *)&msgUSB, TELEMETRY_MSG_USB_HDR_SIZE);
       chnWrite(pChnUSB, (const uint8_t *)&utmp16, msgUSB.data_size);
+    } else {
+      fIQReset = TRUE;
+    }
+    break;
+  case 'd': /* Sends PID gains (0x64 hex; 100 dec). */
+    if (msgUSB.data_size == 0) {
+      msgUSB.data_size = sizeof(PID);
+      chnWrite(pChnUSB, (const uint8_t *)&msgUSB, TELEMETRY_MSG_USB_HDR_SIZE);
+      chnWrite(pChnUSB, (const uint8_t *)&pidc.pid, msgUSB.data_size);
+    } else {
+      fIQReset = TRUE;
+    }
+    break;
+  case 'f': /* Sends the PID setpoint value (0x66 hex; 102 dec). */
+    if (msgUSB.data_size == 0) {
+      msgUSB.data_size = sizeof(pidSetpoint);
+      chnWrite(pChnUSB, (const uint8_t *)&msgUSB, TELEMETRY_MSG_USB_HDR_SIZE);
+      chnWrite(pChnUSB, (const uint8_t *)&pidSetpoint, msgUSB.data_size);
     } else {
       fIQReset = TRUE;
     }
@@ -673,6 +694,7 @@ static void commandProcessUSB(void)
  */
 int main(void) {
   uint_fast8_t loopDiv = 1;
+  uint16_t utmp16;
   thread_t *pThdBlinker;
 
   /* System initializations.
@@ -737,6 +759,14 @@ int main(void) {
           chnWrite(pChnUSB, (const uint8_t *)streamingBuf, msgUSB.data_size);
 
           streamingCnt--; /* Decrease streaming counter. */
+        }
+
+        if (fPIDEnabled) {
+          msgUSB.msg_id    = 'c';
+          msgUSB.data_size = sizeof(utmp16);
+          utmp16 = ad5761rGetData();
+          chnWrite(pChnUSB, (const uint8_t *)&msgUSB, TELEMETRY_MSG_USB_HDR_SIZE);
+          chnWrite(pChnUSB, (const uint8_t *)&utmp16, msgUSB.data_size);
         }
 
         /* Run command processor @ ~92 Hz speed. */
