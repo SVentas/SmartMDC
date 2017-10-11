@@ -58,9 +58,8 @@
 /**
  * L O C A L   V A R I A B L E S
  */
-//static uint8_t rxBuf[AD5761R_BUF_SIZE];
+static uint8_t rxBuf[AD5761R_BUF_SIZE];
 static uint8_t txBuf[AD5761R_BUF_SIZE];
-static uint16_t dataDAC = 0x0000;
 
 /**
  *
@@ -71,19 +70,8 @@ void ad5761rStart(void) {
   txBuf[2] = AD5761R_CRL_ETS | AD5761R_CRL_IRO | AD5761R_CRL_RA0;
 
   spiSelect(&SPID1);
-  spiSend(&SPID1, sizeof(txBuf), (uint8_t *)txBuf);
+  spiExchange(&SPID1, AD5761R_BUF_SIZE, (uint8_t *)txBuf, (uint8_t *)rxBuf);
   spiUnselect(&SPID1);
-  
-  /* Disable daisy-chain functionality */
-  txBuf[0] = AD5761R_DDC_DISABLE;
-  txBuf[1] = 0x00;
-  txBuf[2] = AD5761R_DDC;
-
-  spiSelect(&SPID1);
-  spiSend(&SPID1, sizeof(txBuf), (uint8_t *)txBuf);
-  spiUnselect(&SPID1);
-
-  dataDAC = 0x0000;
 }
 
 /**
@@ -97,30 +85,38 @@ void ad5761rStop(void) {
   txBuf[2] = 0x00;
 
   spiSelect(&SPID1);
-  spiSend(&SPID1, sizeof(txBuf), (uint8_t *)txBuf);
+  spiExchange(&SPID1, AD5761R_BUF_SIZE, (uint8_t *)txBuf, (uint8_t *)rxBuf);
   spiUnselect(&SPID1);
-
-  dataDAC = 0x0000;
 }
 
 /**
  *
  */
 void ad5761rSetData(uint16_t data) {
-  txBuf[0] = AD5761R_UPDATE_DAC_REG;
-  txBuf[1] = data >> 8;
-  txBuf[2] = data & 0x00FF;
+  txBuf[0] = AD5761R_WRITE_INPUT_REG;
+  txBuf[1] = (data & 0xFF00) >> 8;
+  txBuf[2] = (data & 0x00FF) >> 0;
 
   spiSelect(&SPID1);
-  spiSend(&SPID1, sizeof(txBuf), (uint8_t *)txBuf);
+  spiExchange(&SPID1, AD5761R_BUF_SIZE, (uint8_t *)txBuf, (uint8_t *)rxBuf);
   spiUnselect(&SPID1);
-
-  dataDAC = data;
 }
 
 /**
  *
  */
-uint16_t ad5761rGetData(void){
-  return dataDAC;
+uint16_t ad5761rGetData(void) {
+  txBuf[0] = AD5761R_READ_INPUT_REG;
+  txBuf[1] = 0x00;
+  txBuf[2] = 0x00;
+
+  spiSelect(&SPID1);
+  spiExchange(&SPID1, AD5761R_BUF_SIZE, (uint8_t *)txBuf, (uint8_t *)rxBuf);
+  spiUnselect(&SPID1);
+
+  spiSelect(&SPID1);
+  spiExchange(&SPID1, AD5761R_BUF_SIZE, (uint8_t *)txBuf, (uint8_t *)rxBuf);
+  spiUnselect(&SPID1);
+
+  return ((uint16_t)(rxBuf[1] << 8) | rxBuf[2]);
 }

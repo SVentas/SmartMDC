@@ -304,7 +304,7 @@
  * PB6  - TIM8_CH1                  (alternate 5).
  * PB7  - PIN7                      (input floating).
  * PB8  - PIN8                      (input floating).
- * PB9  - TIM4_CH4                  (alternate 2).
+ * PB9  - PIN9                      (input floating).
  * PB10 - PIN10                     (input floating).
  * PB11 - PIN11                     (input floating).
  * PB12 - PIN12                     (input floating).
@@ -350,7 +350,7 @@
                                      PIN_OSPEED_50M(GPIOB_SPI1_SCK) |       \
                                      PIN_OSPEED_50M(GPIOB_SPI1_MISO) |      \
                                      PIN_OSPEED_50M(GPIOB_SPI1_MOSI) |      \
-                                     PIN_OSPEED_2M(GPIOB_TIM8_CH1) |        \
+                                     PIN_OSPEED_50M(GPIOB_TIM8_CH1) |       \
                                      PIN_OSPEED_2M(GPIOB_PIN7) |            \
                                      PIN_OSPEED_2M(GPIOB_PIN8) |            \
                                      PIN_OSPEED_2M(GPIOB_PIN9) |            \
@@ -363,10 +363,10 @@
 #define VAL_GPIOB_PUPDR             (PIN_PUPDR_PULLDOWN(GPIOB_LED_A) |      \
                                      PIN_PUPDR_PULLDOWN(GPIOB_LED_B) |      \
                                      PIN_PUPDR_FLOATING(GPIOB_PIN2) |       \
-                                     PIN_PUPDR_PULLDOWN(GPIOB_SPI1_SCK) |   \
-                                     PIN_PUPDR_PULLDOWN(GPIOB_SPI1_MISO) |  \
-                                     PIN_PUPDR_PULLDOWN(GPIOB_SPI1_MOSI) |  \
-                                     PIN_PUPDR_PULLUP(GPIOB_TIM8_CH1) |     \
+                                     PIN_PUPDR_FLOATING(GPIOB_SPI1_SCK) |   \
+                                     PIN_PUPDR_FLOATING(GPIOB_SPI1_MISO) |  \
+                                     PIN_PUPDR_FLOATING(GPIOB_SPI1_MOSI) |  \
+                                     PIN_PUPDR_FLOATING(GPIOB_TIM8_CH1) |   \
                                      PIN_PUPDR_FLOATING(GPIOB_PIN7) |       \
                                      PIN_PUPDR_FLOATING(GPIOB_PIN8) |       \
                                      PIN_PUPDR_FLOATING(GPIOB_PIN9) |       \
@@ -401,7 +401,7 @@
                                      PIN_AFIO_AF(GPIOB_TIM8_CH1, 5) |       \
                                      PIN_AFIO_AF(GPIOB_PIN7, 0))
 #define VAL_GPIOB_AFRH              (PIN_AFIO_AF(GPIOB_PIN8, 0) |           \
-                                     PIN_AFIO_AF(GPIOB_PIN9, 2) |           \
+                                     PIN_AFIO_AF(GPIOB_PIN9, 0) |           \
                                      PIN_AFIO_AF(GPIOB_PIN10, 0) |          \
                                      PIN_AFIO_AF(GPIOB_PIN11, 0) |          \
                                      PIN_AFIO_AF(GPIOB_PIN12, 0) |          \

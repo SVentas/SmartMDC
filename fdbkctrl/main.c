@@ -88,14 +88,14 @@ typedef struct tagPWMOutputStruct {
 } __attribute__((packed)) PWMOutputStruct, *PPWMOutputStruct;
 
 /*
- * SPI1 configuration (4M5Hz, 8-bit, CPOL=0, CPHA=1, MSb first).
+ * SPI1 configuration (9MHz, 8-bit, CPOL=1, CPHA=0, MSb first).
  */
 static const SPIConfig spicfg1 = {
   end_cb: NULL,             /* Operation complete callback        */
   ssport: GPIOA,            /* The chip select line port.         */
   sspad:  GPIOA_SPI1_NSS,   /* The chip select line pad number.   */
-  cr1:    SPI_CR1_BR_1 |    /* CR1 register initialization data.  */
-          SPI_CR1_CPHA,
+  cr1:    SPI_CR1_BR_0 |    /* CR1 register initialization data.  */
+          SPI_CR1_CPOL,
   cr2:    SPI_CR2_DS_2 |    /* CR2 register initialization data.  */
           SPI_CR2_DS_1 |
           SPI_CR2_DS_0
@@ -694,7 +694,7 @@ static void commandProcessUSB(void)
  */
 int main(void) {
   uint_fast8_t loopDiv = 1;
-  uint16_t utmp16;
+  uint16_t utmp16 = 0;
   thread_t *pThdBlinker;
 
   /* System initializations.
@@ -709,6 +709,12 @@ int main(void) {
   /* Initializes a serial-over-USB CDC driver. */
   sduObjectInit(&SDU1);
   sduStart(&SDU1, &serusbcfg);
+  
+  /* Activates the pair of ADC1 and ADC2 drivers. */
+  adcStart(&ADCD1, NULL);
+
+  /* Activates the SPI1 driver. */
+  spiStart(&SPID1, &spicfg1);
 
   /* Activates the USB driver and then the USB bus pull-up on D+.
    * Note, a delay is inserted in order to not have to disconnect the cable
@@ -719,15 +725,14 @@ int main(void) {
   usbStart(serusbcfg.usbp, &usbcfg);
   usbConnectBus(serusbcfg.usbp);
 
-  /* Activates the ADC1 driver and the ADC3 driver. */
-  adcStart(&ADCD1, NULL);
-
-  /* Activates the SPI1 driver. */
-  spiStart(&SPID1, &spicfg1);
-
+  /* Reset the AD5761R high voltage bipollar DAC device. */
+  ad5761rStop();
+  chThdSleepMilliseconds(500);
+  
   /* Activates the AD5761R high voltage bipollar DAC device. */
   ad5761rStart();
-
+  ad5761rSetData(0x0000);
+  
   /* Creates the blinker thread. */
   pThdBlinker = chThdCreateStatic(waBlinker, sizeof(waBlinker),
     LOWPRIO, Blinker, NULL);
@@ -774,7 +779,6 @@ int main(void) {
           if (commandGetUSB()) {
             commandProcessUSB();
           }
-
           loopDiv = 1;
         }
       }
