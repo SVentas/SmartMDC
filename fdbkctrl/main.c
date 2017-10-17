@@ -298,9 +298,9 @@ static void adcProcessData(void) {
     tmpAD2 = tmpAD1;
 
     tmpRes1 = __SASX(tmpAD1, tmpAD2);     /* [D+A,A-D] */
-    tmpRes2 = __SASX(tmpCB1, tmpCB2);     /* [B+C,C-B] */
-    tmpRes3 = __SADD16(tmpRes1, tmpRes2); /* [(D+A)+(B+C),(A-D)+(C-B)] */
-    tmpRes4 = __SSUB16(tmpRes2, tmpRes1); /* [(B+C)-(D+A),(C+D)-(A+B)] */
+    tmpRes2 = __SASX(tmpCB1, tmpCB2);     /* [C+B,C-B] */
+    tmpRes3 = __SADD16(tmpRes1, tmpRes2); /* [(D+A)+(C+B),(A-D)+(C-B)] */
+    tmpRes4 = __SSUB16(tmpRes2, tmpRes1); /* [(C+B)-(D+A),(C+D)-(A+B)] */
 
     fe = (tmpRes3 << 16) >> 16;
     sum = (tmpRes3 >> 16);

@@ -73,7 +73,7 @@
 #define GPIOB_SPI1_MISO         4U  // MISO
 #define GPIOB_SPI1_MOSI         5U  // MOSI
 #define GPIOB_TIM8_CH1          6U  // TRIGER IN
-#define GPIOB_PIN7              7U
+#define GPIOB_ALERT             7U  // NOT ALERT
 #define GPIOB_PIN8              8U
 #define GPIOB_PIN9              9U
 #define GPIOB_PIN10             10U
@@ -302,7 +302,7 @@
  * PB4  - SPI1_MISO                 (alternate 5).
  * PB5  - SPI1_MOSI                 (alternate 5).
  * PB6  - TIM8_CH1                  (alternate 5).
- * PB7  - PIN7                      (input floating).
+ * PB7  - ALERT                     (input floating).
  * PB8  - PIN8                      (input floating).
  * PB9  - PIN9                      (input floating).
  * PB10 - PIN10                     (input floating).
@@ -319,7 +319,7 @@
                                      PIN_MODE_ALTERNATE(GPIOB_SPI1_MISO) |  \
                                      PIN_MODE_ALTERNATE(GPIOB_SPI1_MOSI) |  \
                                      PIN_MODE_ALTERNATE(GPIOB_TIM8_CH1) |   \
-                                     PIN_MODE_INPUT(GPIOB_PIN7) |           \
+                                     PIN_MODE_INPUT(GPIOB_ALERT) |           \
                                      PIN_MODE_INPUT(GPIOB_PIN8) |           \
                                      PIN_MODE_INPUT(GPIOB_PIN9) |           \
                                      PIN_MODE_INPUT(GPIOB_PIN10) |          \
@@ -335,7 +335,7 @@
                                      PIN_OTYPE_PUSHPULL(GPIOB_SPI1_MISO) |  \
                                      PIN_OTYPE_PUSHPULL(GPIOB_SPI1_MOSI) |  \
                                      PIN_OTYPE_PUSHPULL(GPIOB_TIM8_CH1) |   \
-                                     PIN_OTYPE_PUSHPULL(GPIOB_PIN7) |       \
+                                     PIN_OTYPE_PUSHPULL(GPIOB_ALERT) |       \
                                      PIN_OTYPE_PUSHPULL(GPIOB_PIN8) |       \
                                      PIN_OTYPE_PUSHPULL(GPIOB_PIN9) |       \
                                      PIN_OTYPE_PUSHPULL(GPIOB_PIN10) |      \
@@ -351,7 +351,7 @@
                                      PIN_OSPEED_50M(GPIOB_SPI1_MISO) |      \
                                      PIN_OSPEED_50M(GPIOB_SPI1_MOSI) |      \
                                      PIN_OSPEED_50M(GPIOB_TIM8_CH1) |       \
-                                     PIN_OSPEED_2M(GPIOB_PIN7) |            \
+                                     PIN_OSPEED_50M(GPIOB_ALERT) |          \
                                      PIN_OSPEED_2M(GPIOB_PIN8) |            \
                                      PIN_OSPEED_2M(GPIOB_PIN9) |            \
                                      PIN_OSPEED_2M(GPIOB_PIN10) |           \
@@ -367,7 +367,7 @@
                                      PIN_PUPDR_FLOATING(GPIOB_SPI1_MISO) |  \
                                      PIN_PUPDR_FLOATING(GPIOB_SPI1_MOSI) |  \
                                      PIN_PUPDR_FLOATING(GPIOB_TIM8_CH1) |   \
-                                     PIN_PUPDR_FLOATING(GPIOB_PIN7) |       \
+                                     PIN_PUPDR_FLOATING(GPIOB_ALERT) |       \
                                      PIN_PUPDR_FLOATING(GPIOB_PIN8) |       \
                                      PIN_PUPDR_FLOATING(GPIOB_PIN9) |       \
                                      PIN_PUPDR_FLOATING(GPIOB_PIN10) |      \
@@ -383,7 +383,7 @@
                                      PIN_ODR_LOW(GPIOB_SPI1_MISO) |         \
                                      PIN_ODR_LOW(GPIOB_SPI1_MOSI) |         \
                                      PIN_ODR_LOW(GPIOB_TIM8_CH1) |          \
-                                     PIN_ODR_LOW(GPIOB_PIN7) |              \
+                                     PIN_ODR_LOW(GPIOB_ALERT) |              \
                                      PIN_ODR_LOW(GPIOB_PIN8) |              \
                                      PIN_ODR_LOW(GPIOB_PIN9) |              \
                                      PIN_ODR_LOW(GPIOB_PIN10) |             \
@@ -399,7 +399,7 @@
                                      PIN_AFIO_AF(GPIOB_SPI1_MISO, 5) |      \
                                      PIN_AFIO_AF(GPIOB_SPI1_MOSI, 5) |      \
                                      PIN_AFIO_AF(GPIOB_TIM8_CH1, 5) |       \
-                                     PIN_AFIO_AF(GPIOB_PIN7, 0))
+                                     PIN_AFIO_AF(GPIOB_ALERT, 0))
 #define VAL_GPIOB_AFRH              (PIN_AFIO_AF(GPIOB_PIN8, 0) |           \
                                      PIN_AFIO_AF(GPIOB_PIN9, 0) |           \
                                      PIN_AFIO_AF(GPIOB_PIN10, 0) |          \
