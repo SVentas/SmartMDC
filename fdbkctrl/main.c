@@ -16,43 +16,38 @@
 
 #include "ch.h"
 #include "hal.h"
-
-#include "usbcfg.h"
-
 #include "arm_math.h"
-
+#include "usbcfg.h"
 #include "ad5761r.h"
 
 /* Available streaming channels. */
 #define STREAMING_CHANNEL_FE        0x00
-#define STREAMING_CHANNEL_CE        0x01
-#define STREAMING_CHANNEL_SUM       0x02
-#define STREAMING_CHANNEL_A         0x03
-#define STREAMING_CHANNEL_B         0x04
-#define STREAMING_CHANNEL_C         0x05
-#define STREAMING_CHANNEL_D         0x06
-
-#define STREAMING_COUNTER_VALUE     8
+#define STREAMING_CHANNEL_A         0x01
+#define STREAMING_CHANNEL_B         0x02
+#define STREAMING_CHANNEL_C         0x03
+#define STREAMING_CHANNEL_D         0x04
 
 /* ADC timeout in ms. */
-#define ADC_WAIT_TIMEOUT_MS         10
+#define ADC_WAIT_TIMEOUT_MS         2
+
+/* Stream timeout in ms. */
+#define STREAM_WAIT_TIMEOUT_MS      20
 
 /* Buffer size of the ADC subsystem. */
-#define ADC_BUF_DEPTH               32
+#define ADC_BUF_DEPTH               16
+#define ADC_CIRC_BUF_DEPTH          ADC_BUF_DEPTH * 2
 
 /* ADC1_2 conversion group. */
-#define ADC_GRP1_NUM_CHANNELS       0x04
-#define ADC_GRP1_BUF_DEPTH          (ADC_BUF_DEPTH * ADC_GRP1_NUM_CHANNELS)
+#define ADC_GRP1_NUM_CHANNELS       4
+#define ADC_GRP1_BUF_DEPTH          (ADC_CIRC_BUF_DEPTH * ADC_GRP1_NUM_CHANNELS)
+
+/* Buffer size of the Streaming subsystem. */
+#define STREAMING_BUF_DEPTH         16
+#define STREAMING_CIRC_BUF_DEPTH    STREAMING_BUF_DEPTH * 2
 
 /* Telemetry message related constants. */
 #define TELEMETRY_MSG_USB_SIGNATURE 0xAA
 #define TELEMETRY_MSG_USB_HDR_SIZE  0x04
-#define TELEMETRY_MSG_COM_HDR_SIZE  0x02
-#define TELEMETRY_LOOP_DIV          5
-
-/* SmartMDC Modes */
-#define MODE_STREAMING              0
-#define MODE_SCANNING               1
 
 /* MACROS */
 #define SYMVAL(sym)                 (uint32_t)(((uint8_t *)&(sym)) - ((uint8_t *)0))
@@ -82,11 +77,6 @@ typedef struct tagPIDCtrl {
   int16_t prevErr;    /* Previous process error. */
 } __attribute__((packed)) PIDCtrl, *PPIDCtrl;
 
-typedef struct tagPWMOutputStruct {
-  uint8_t power;
-  uint8_t flags;
-} __attribute__((packed)) PWMOutputStruct, *PPWMOutputStruct;
-
 /*
  * SPI1 configuration (9MHz, 8-bit, CPOL=1, CPHA=0, MSb first).
  */
@@ -101,15 +91,17 @@ static const SPIConfig spicfg1 = {
           SPI_CR2_DS_0
 };
 
-/* ADC1_2 samples. */
-static adcsample_t samplesCBAD[ADC_GRP1_NUM_CHANNELS * ADC_GRP1_BUF_DEPTH];
-static adcsample_t *bufferCBAD;
+/* ADC1_2 samples. Circular buffer. */
+static adcsample_t samplesBCDA[ADC_GRP1_BUF_DEPTH];
+static adcsample_t *bufferBCDA;
+
 /* Streaming buffer. */
-static uint16_t streamingBuf[ADC_BUF_DEPTH];
+static uint16_t streamingCircBuf[STREAMING_CIRC_BUF_DEPTH];
+static uint16_t *streamingBuf = streamingCircBuf;
 
 /* Streaming control variables. */
 static uint8_t streamingChnID = STREAMING_CHANNEL_FE;
-static uint32_t streamingCnt = 0;
+static bool fStreamingData = FALSE;
 
 /* PID controller settings. */
 static PIDCtrl pidc = {
@@ -134,6 +126,8 @@ static bool fRunMain = TRUE;
 
 /* Binary semaphore for ADC synchronization. */
 static BSEMAPHORE_DECL(bsemADCReady, TRUE);
+/* Binary semaphore for Data Streaming synchronization. */
+static BSEMAPHORE_DECL(bsemStreamReady, TRUE);
 
 /* Virtual serial port over USB.*/
 SerialUSBDriver SDU1;
@@ -148,20 +142,13 @@ static MessageUSB msgUSB = {
   data_size:  0                             /* Data size.   */
 };
 
-static uint8_t smartMDCMode = MODE_STREAMING;
-
-/* PWM output settings of the motor. */
-static PWMOutputStruct pwmOutput = {1,0};
-/* Speed of the motor. */
-static uint32_t motorSpeed = 0;
-
 /*
- * ADC streaming callback for C, B, A and D channels.
+ * ADC streaming callback for B, C, D and A channels.
  */
-static void adccallbackCBAD(ADCDriver *adcp, adcsample_t *buffer, size_t n) {
+static void adccallbackBCDA(ADCDriver *adcp, adcsample_t *buffer, size_t n) {
   (void)adcp;
   (void)n;
-  bufferCBAD = buffer;
+  bufferBCDA = buffer;
 
   /* Change state of the synchronizing semaphore. */
   chBSemSignalI(&bsemADCReady);
@@ -170,13 +157,13 @@ static void adccallbackCBAD(ADCDriver *adcp, adcsample_t *buffer, size_t n) {
 /*
  * ADC1_2 conversion group.
  * Mode:      Continuous, 32 samples of 4 channels each, SW triggered,
-              (72 000 000 / 4) / (601.5 + 12.5) / 2 = 14658 sps (7 kHz bw).
+              (72 000 000 / 4) / (601.5 + 12.5) / 2 = 14658 sps (~7 kHz bw).
  * Channels:  ADC1_CH3-(C), ADC2_CH1-(B), ADC1_CH4-(A), ADC2_CH2-(D).
  */
 static ADCConversionGroup adcgrpcfg1 = {
   TRUE,                                     /* Circular */
   ADC_GRP1_NUM_CHANNELS,
-  adccallbackCBAD,
+  adccallbackBCDA,
   NULL,
   ADC_CFGR_CONT,                            /* CFGR     */
   ADC_TR(0, 4095),                          /* TR1      */
@@ -208,23 +195,6 @@ static ADCConversionGroup adcgrpcfg1 = {
     0
   }
 };
-
-/*
- * Blinker thread (low priority).
- */
-static THD_WORKING_AREA(waBlinker, 64);
-static THD_FUNCTION(Blinker, arg) {
-  (void)arg;
-  while (!chThdShouldTerminateX()) {
-    palTogglePad(GPIOB, GPIOB_LED_A);
-
-    if (serusbcfg.usbp->state == USB_ACTIVE) {
-      chThdSleepMilliseconds(1000);
-    } else {
-      chThdSleepMilliseconds(250);
-    }
-  }
-}
 
 /**
  *
@@ -266,154 +236,117 @@ static void pidApply(PIDCtrl *pidc, int16_t pv, int16_t sp) {
 
 /**
  *
+ * INFO:
+ * - SASX instruction exchanges the two halfwords of the second operand,
+ *   then performs an addition on the two top halfwords of the operands
+ *   and a subtraction on the bottom two halfwords.
+ *   It writes the results into the corresponding halfwords of the destination.
  */
 static void adcProcessData(void) {
   uint_fast8_t n;
-  uint16_t sum;
-  int16_t fe;
-  int16_t ce;
-  uint32_t sumSum = 0;
-  int32_t sumFE = 0;
-  int32_t sumCE = 0;
-  uint16_t avgSum;
-  int16_t avgFE;
-  int16_t avgCE;
-
-#if defined(ARM_MATH_CM4)
-  int32_t tmpCB1, tmpCB2;
-  int32_t tmpAD1, tmpAD2;
-  int32_t tmpRes1, tmpRes2, tmpRes3, tmpRes4;
-#else
-  adcsample_t tmpA, tmpD, tmpC, tmpB;
-  uint16_t sumAD, sumCB;
-  int16_t diffAD, diffCB;
-#endif /* ARM_MATH_CM4 */
+  int32_t sumFE = 0, sumA = 0, sumB = 0, sumC = 0, sumD = 0;
+  int16_t avgFE, avgA, avgB, avgC, avgD;
+  int32_t tmpBC, tmpCB, tmpDA, tmpAD;
+  int32_t tmpRes1, tmpRes2, tmpArg1, tmpArg2;
+  static uint8_t cnt = 0;
 
   for (n = 0; n < ADC_BUF_DEPTH; n++) {
-#if defined(ARM_MATH_CM4)
-    tmpCB1 = *__SIMD32(bufferCBAD)++;     /* [B,C] */
-    tmpCB2 = tmpCB1;
+    tmpBC = *__SIMD32(bufferBCDA)++;  /* [B,C] */
+    tmpCB = tmpBC;                    /* [C,B] */
 
-    tmpAD1 = *__SIMD32(bufferCBAD)++;     /* [D,A] */
-    tmpAD2 = tmpAD1;
+    tmpDA = *__SIMD32(bufferBCDA)++;  /* [D,A] */
+    tmpAD = tmpDA;                    /* [A,D] */
 
-    tmpRes1 = __SASX(tmpAD1, tmpAD2);     /* [D+A,A-D] */
-    tmpRes2 = __SASX(tmpCB1, tmpCB2);     /* [C+B,C-B] */
-    tmpRes3 = __SADD16(tmpRes1, tmpRes2); /* [(D+A)+(C+B),(A-D)+(C-B)] */
-    tmpRes4 = __SSUB16(tmpRes2, tmpRes1); /* [(C+B)-(D+A),(C+D)-(A+B)] */
+    /* FE = [(A-D)/(A+D)]-[(B-C)/(B+C)] = [(A-D)/(A+D)]+[(C-B)/(C+B)]; */
+    tmpRes1 = __SASX(tmpDA, tmpAD);   /* [D+A,A-D] */
+    tmpRes2 = __SASX(tmpBC, tmpCB);   /* [B+C,C-B] */
 
-    fe = (tmpRes3 << 16) >> 16;
-    sum = (tmpRes3 >> 16);
-    ce = (tmpRes4 >> 16);
-#else
-    tmpC = *bufferCBAD++;
-    tmpB = *bufferCBAD++;
-    sumCB = tmpC + tmpB;
-    diffCB = tmpC - tmpB;
+    /* Fixed point version of (A-D)/(A+D) mapped to 12-bit signed value. */
+    tmpArg1 = (int32_t)(tmpRes1 << 16);
+    tmpArg2 = (int32_t)(tmpRes1 >> 16) << 5;
+    tmpRes1 = (int32_t)(tmpArg1 / tmpArg2);
 
-    tmpA = *bufferCBAD++;
-    tmpD = *bufferCBAD++;
-    sumAD = tmpA + tmpD;
-    diffAD = tmpA - tmpD;
+    /* Fixed point version of (C-B)/(C+B) mapped to 12-bit signed value. */
+    tmpArg1 = (int32_t)(tmpRes2 << 16);
+    tmpArg2 = (int32_t)(tmpRes2 >> 16) << 5;
+    tmpRes2 = (int32_t)(tmpArg1 / tmpArg2);
 
-    sum  = sumAD + sumCB;
-    /* (A-D)-(B-C) =
-     *  A-D - B+C  =
-     *  A-D + C-B  =
-     * (A-D)+(C-B);
-     */
-    fe = diffAD + diffCB;
-    ce = sumCB - sumAD;
-#endif /* ARM_MATH_CM4 */
-
-    sumFE += fe;
-    sumCE += ce;
-    sumSum += sum;
-
-    switch (streamingChnID) {
-    case STREAMING_CHANNEL_CE:
-      streamingBuf[n] = ce;
-      break;
-    case STREAMING_CHANNEL_SUM:
-      streamingBuf[n] = sum;
-      break;
-    case STREAMING_CHANNEL_A:
-#if defined(ARM_MATH_CM4)
-      streamingBuf[n] = (tmpAD1 << 16) >> 16;
-#else
-      streamingBuf[n] = tmpA;
-#endif /* ARM_MATH_CM4 */
-      break;
-    case STREAMING_CHANNEL_B:
-#if defined(ARM_MATH_CM4)
-      streamingBuf[n] = (tmpCB1 >> 16);
-#else
-      streamingBuf[n] = tmpB;
-#endif /* ARM_MATH_CM4 */
-      break;
-    case STREAMING_CHANNEL_C:
-#if defined(ARM_MATH_CM4)
-      streamingBuf[n] = (tmpCB1 << 16) >> 16;
-#else
-      streamingBuf[n] = tmpC;
-#endif /* ARM_MATH_CM4 */
-      break;
-    case STREAMING_CHANNEL_D:
-#if defined(ARM_MATH_CM4)
-      streamingBuf[n] = (tmpAD1 >> 16);
-#else
-      streamingBuf[n] = tmpD;
-#endif /* ARM_MATH_CM4 */
-      break;
-    default:
-      streamingBuf[n] = (uint16_t)fe;
-    }
+    sumFE += (tmpRes1 + tmpRes2);
+    sumC  += (tmpBC << 16) >> 16;
+    sumB  += (tmpBC >> 16);
+    sumA  += (tmpDA << 16) >> 16;
+    sumD  += (tmpDA >> 16);
   }
 
   avgFE = sumFE / ADC_BUF_DEPTH;
-  avgCE = sumCE / ADC_BUF_DEPTH;
-  avgSum = sumSum  / ADC_BUF_DEPTH;
-  (void)avgCE;
-  (void)avgSum;
+  avgC  = sumC  / ADC_BUF_DEPTH;
+  avgB  = sumB  / ADC_BUF_DEPTH;
+  avgA  = sumA  / ADC_BUF_DEPTH;
+  avgD  = sumD  / ADC_BUF_DEPTH;
 
   /* Apply PID controller. */
   if (fPIDEnabled) {
     pidApply(&pidc, avgFE, pidSetpoint);
   }
+
+  switch (streamingChnID) {
+  case STREAMING_CHANNEL_A:
+    streamingCircBuf[cnt] = avgA;
+    break;
+  case STREAMING_CHANNEL_B:
+    streamingCircBuf[cnt] = avgB;
+    break;
+  case STREAMING_CHANNEL_C:
+    streamingCircBuf[cnt] = avgC;
+    break;
+  case STREAMING_CHANNEL_D:
+    streamingCircBuf[cnt] = avgD;
+    break;
+  default:
+    streamingCircBuf[cnt] = avgFE;
+  }
+
+  cnt++;
+  if (cnt == STREAMING_BUF_DEPTH) {
+    streamingBuf = &streamingCircBuf[0];
+    /* Change state of the synchronizing semaphore. */
+    chBSemSignal(&bsemStreamReady);
+  } else if (cnt == STREAMING_CIRC_BUF_DEPTH) {
+    cnt = 0;
+    streamingBuf = &streamingCircBuf[STREAMING_BUF_DEPTH];
+    /* Change state of the synchronizing semaphore. */
+    chBSemSignal(&bsemStreamReady);
+  }
 }
 
-/**
- *
+/*
+ * Blinker thread (low priority).
  */
-static void modeUpdate(uint8_t newMode) {
-  smartMDCMode = newMode;
-#if defined(USE_ADC_HW_TRG)
-  /* Stop ADC conversions. */
-  osalSysLock();
-  adcStopConversion(&ADCD1);
-  osalSysUnlock();
+static THD_WORKING_AREA(waBlinker, 64);
+static THD_FUNCTION(Blinker, arg) {
+  (void)arg;
+  while (!chThdShouldTerminateX()) {
+    palTogglePad(GPIOB, GPIOB_LED_A);
 
-  switch (smartMDCMode) {
-  case MODE_SCANNING:
-    fSkipNextPeriodEvent = TRUE;
-    /* Reconfigure hardware triggering to TIM8_TRGO2. */
-    adcgrpcfg1.cfgr = ADC_CFGR_CONT | ADC_CFGR_EXTEN_RISING | ADC_CFGR_EXTSEL_SRC(8);
-    break;
-  default: // MODE_STREAMING
-    fSkipNextPeriodEvent = FALSE;
-    /* Reconfigure hardware triggering to TIM2_TRGO. */
-    adcgrpcfg1.cfgr = ADC_CFGR_CONT | ADC_CFGR_EXTEN_RISING | ADC_CFGR_EXTSEL_SRC(11);
-
-    gptStartOneShot(&GPTD2, ADC_GPT_START_TIMEOUT_MS);
+    if (serusbcfg.usbp->state == USB_ACTIVE) {
+      chThdSleepMilliseconds(1000);
+    } else {
+      chThdSleepMilliseconds(250);
+    }
   }
-  /* Starts an ADC continuous conversion.
-   * If software trigger is enabled conversion starts immediately.
-   * If hardware trigger is enabled ADC waits until hardware trigger event occurs.
-   */
-  osalSysLock();
-  adcStartConversion(&ADCD1, &adcgrpcfg1, samplesCBAD, ADC_GRP1_BUF_DEPTH);
-  osalSysUnlock();
-#endif /* USE_ADC_HW_TRG */
+}
+
+/*
+ * Worker thread (high priority).
+ */
+static THD_WORKING_AREA(waWorker, 1024);
+static THD_FUNCTION(Worker, arg) {
+  (void)arg;
+  while (!chThdShouldTerminateX()) {
+    if (chBSemWaitTimeout(&bsemADCReady, MS2ST(ADC_WAIT_TIMEOUT_MS)) == MSG_OK) {
+      adcProcessData();
+    }
+  }
 }
 
 /**
@@ -475,37 +408,32 @@ static bool commandGetUSB(void) {
 static void commandProcessUSB(void)
 {
   uint16_t utmp16;
-  uint8_t utmp8;
   bool fIQReset = FALSE;
 
   switch (msgUSB.msg_id) {
   /**
    * R E C E I V E R   S E C T I O N
    */
-  case 'A': /* Updates position of the FOC actuator (0x41 hex; 65 dec). */
-    if (msgUSB.data_size == sizeof(utmp16)) {
-      chnRead(pChnUSB, (uint8_t *)&utmp16, msgUSB.data_size);
-      utmp16 &= 0x0FFF; /* Limit to 12 bits right alligned. */
-      //dacPutChannelX(&DACD1, DAC_CHANNEL_FOC, utmp16);
-    } else {
-      fIQReset = TRUE;
-    }
-    break;
-  case 'B': /* Updates position of the RAD actuator (0x42 hex; 66 dec). */
-    if (msgUSB.data_size == sizeof(utmp16)) {
-      chnRead(pChnUSB, (uint8_t *)&utmp16, msgUSB.data_size);
-      utmp16 &= 0x0FFF; /* Limit to 12 bits right alligned. */
-      //dacPutChannelX(&DACD2, DAC_CHANNEL_RAD, utmp16);
-    } else {
-      fIQReset = TRUE;
-    }
-    break;
-  case 'C': /* Updates position of the FBK actuator (0x43 hex; 67 dec). */
+  case 'A': /* Updates position of the FBK actuator (0x41 hex; 65 dec). */
     if (msgUSB.data_size == sizeof(utmp16)) {
       chnRead(pChnUSB, (uint8_t *)&utmp16, msgUSB.data_size);
       if (!fPIDEnabled) {
         ad5761rSetData(utmp16);
       }
+    } else {
+      fIQReset = TRUE;
+    }
+    break;
+  case 'B': /* Streaming data enable/disable (0x42 hex; 66 dec). */
+    if (msgUSB.data_size == sizeof(fStreamingData)) {
+      chnRead(pChnUSB, (uint8_t *)&fStreamingData, msgUSB.data_size);
+    } else {
+      fIQReset = TRUE;
+    }
+    break;
+  case 'C': /* Update streaming channel ID (0x43 hex; 67 dec). */
+    if (msgUSB.data_size == sizeof(streamingChnID)) {
+      chnRead(pChnUSB, (uint8_t *)&streamingChnID, msgUSB.data_size);
     } else {
       fIQReset = TRUE;
     }
@@ -521,11 +449,6 @@ static void commandProcessUSB(void)
     if (msgUSB.data_size == sizeof(fPIDEnabled)) {
       chnRead(pChnUSB, (uint8_t *)&fPIDEnabled, msgUSB.data_size);
       if (fPIDEnabled) {
-        if (pidc.pid.I == 0.0f) {
-          pidc.integral = 0x00000000;
-        } else {
-          pidc.integral = ad5761rGetData() / pidc.pid.I;
-        }
         palSetPad(GPIOB, GPIOB_LED_B);
       } else {
         palClearPad(GPIOB, GPIOB_LED_B);
@@ -548,45 +471,6 @@ static void commandProcessUSB(void)
       fIQReset = TRUE;
     }
     break;
-  case 'O': /* Update PWM settings of the motor driver. */
-    if (msgUSB.data_size == sizeof(pwmOutput)) {
-      chnRead(pChnUSB, (uint8_t *)&pwmOutput, msgUSB.data_size);
-      /* Forwarding message to the VauDUO motor driver board. */
-      //msgCOM.msg_id = 'A';
-      //msgCOM.data_size = sizeof(pwmOutput);
-      //chnWrite(pChnCOM, (const uint8_t *)&msgCOM, TELEMETRY_MSG_COM_HDR_SIZE);
-      //chnWrite(pChnCOM, (const uint8_t *)&pwmOutput, msgCOM.data_size);
-    } else {
-      fIQReset = TRUE;
-    }
-    break;
-  case 'P': /* Update motor driving speed. */
-    if (msgUSB.data_size == sizeof(motorSpeed)) {
-      chnRead(pChnUSB, (uint8_t *)&motorSpeed, msgUSB.data_size);
-      /* Forwarding message to the VauDUO motor driver board. */
-      //msgCOM.msg_id = 'B';
-      //msgCOM.data_size = sizeof(motorSpeed);
-      //chnWrite(pChnCOM, (const uint8_t *)&msgCOM, TELEMETRY_MSG_COM_HDR_SIZE);
-      //chnWrite(pChnCOM, (const uint8_t *)&motorSpeed, msgCOM.data_size);
-    } else {
-      fIQReset = TRUE;
-    }
-    break;
-  case 'S': /* Update streaming channel ID (0x53 hex; 83 dec). */
-    if (msgUSB.data_size == sizeof(streamingChnID)) {
-      chnRead(pChnUSB, (uint8_t *)&streamingChnID, msgUSB.data_size);
-    } else {
-      fIQReset = TRUE;
-    }
-    break;
-  case 'T': /* Switch between Streaming/Scanning modes. */
-    if (msgUSB.data_size == sizeof(utmp8)) {
-      chnRead(pChnUSB, (uint8_t *)&utmp8, msgUSB.data_size);
-      modeUpdate(utmp8);
-    } else {
-      fIQReset = TRUE;
-    }
-    break;
   case 'X': /* Shuts down the controller and reboots into bootloader (0x58 hex; 88 dec). */
     /* Place a special mark at the end of RAM as a sign for Reset Handler
      * to enter bootloader.
@@ -601,34 +485,30 @@ static void commandProcessUSB(void)
   /**
    * T R A N S M I T T E R   S E C T I O N
    */
-  case 'a': /* Sends value of the FOC actuator (0x61 hex; 97 dec). */
-    if (msgUSB.data_size == 0) {
-      msgUSB.data_size = sizeof(utmp16);
-      //utmp16 = (uint16_t)dac_lld_get_channel(&DACD1, DAC_CHANNEL_FOC);
-      utmp16 = 0x0000;
-      chnWrite(pChnUSB, (const uint8_t *)&msgUSB, TELEMETRY_MSG_USB_HDR_SIZE);
-      chnWrite(pChnUSB, (const uint8_t *)&utmp16, msgUSB.data_size);
-    } else {
-      fIQReset = TRUE;
-    }
-    break;
-  case 'b': /* Sends value of the RAD actuator (0x62 hex; 98 dec). */
-    if (msgUSB.data_size == 0) {
-      msgUSB.data_size = sizeof(utmp16);
-      //utmp16 = (uint16_t)dac_lld_get_channel(&DACD2, DAC_CHANNEL_RAD);
-      utmp16 = 0x0000;
-      chnWrite(pChnUSB, (const uint8_t *)&msgUSB, TELEMETRY_MSG_USB_HDR_SIZE);
-      chnWrite(pChnUSB, (const uint8_t *)&utmp16, msgUSB.data_size);
-    } else {
-      fIQReset = TRUE;
-    }
-    break;
-  case 'c': /* Sends value of the FBK actuator (0x63 hex; 99 dec). */
+  case 'a': /* Sends value of the FBK actuator (0x61 hex; 97 dec). */
     if (msgUSB.data_size == 0) {
       msgUSB.data_size = sizeof(utmp16);
       utmp16 = ad5761rGetData();
       chnWrite(pChnUSB, (const uint8_t *)&msgUSB, TELEMETRY_MSG_USB_HDR_SIZE);
       chnWrite(pChnUSB, (const uint8_t *)&utmp16, msgUSB.data_size);
+    } else {
+      fIQReset = TRUE;
+    }
+    break;
+  case 'b': /* Sends the Streaming data enable/disable flag (0x62 hex; 98 dec). */
+    if (msgUSB.data_size == 0) {
+      msgUSB.data_size = sizeof(fStreamingData);
+      chnWrite(pChnUSB, (const uint8_t *)&msgUSB, TELEMETRY_MSG_USB_HDR_SIZE);
+      chnWrite(pChnUSB, (const uint8_t *)&fStreamingData, msgUSB.data_size);
+    } else {
+      fIQReset = TRUE;
+    }
+    break;
+  case 'c': /* Sends streaming channel ID (0x63 hex; 99 dec). */
+    if (msgUSB.data_size == 0) {
+      msgUSB.data_size = sizeof(streamingChnID);
+      chnWrite(pChnUSB, (const uint8_t *)&msgUSB, TELEMETRY_MSG_USB_HDR_SIZE);
+      chnWrite(pChnUSB, (const uint8_t *)&streamingChnID, msgUSB.data_size);
     } else {
       fIQReset = TRUE;
     }
@@ -642,6 +522,15 @@ static void commandProcessUSB(void)
       fIQReset = TRUE;
     }
     break;
+  case 'e': /* Sends the PID loop enable/dsable flag (0x65 hex; 101 dec). */
+    if (msgUSB.data_size == 0) {
+      msgUSB.data_size = sizeof(fPIDEnabled);
+      chnWrite(pChnUSB, (const uint8_t *)&msgUSB, TELEMETRY_MSG_USB_HDR_SIZE);
+      chnWrite(pChnUSB, (const uint8_t *)&fPIDEnabled, msgUSB.data_size);
+    } else {
+      fIQReset = TRUE;
+    }
+    break;
   case 'f': /* Sends the PID setpoint value (0x66 hex; 102 dec). */
     if (msgUSB.data_size == 0) {
       msgUSB.data_size = sizeof(pidSetpoint);
@@ -651,29 +540,11 @@ static void commandProcessUSB(void)
       fIQReset = TRUE;
     }
     break;
-  case 'o': /* Sends a PWM settings request of the motor to the VauDUO board. */
+  case 'g': /* Sends the PID Invert Error flag (0x67 hex; 103 dec). */
     if (msgUSB.data_size == 0) {
-      /* Forwarding message to the VauDUO motor driver board. */
-      //msgCOM.msg_id = 'a';
-      //msgCOM.data_size = 0;
-      //chnWrite(pChnCOM, (const uint8_t *)&msgCOM, TELEMETRY_MSG_COM_HDR_SIZE);
-    } else {
-      fIQReset = TRUE;
-    }
-    break;
-  case 'p': /* Sends a speed request of the motor to the VauDUO board. */
-     if (msgUSB.data_size == 0) {
-      /* Forwarding message to the VauDUO motor driver board. */
-      //msgCOM.msg_id = 'b';
-      //msgCOM.data_size = 0;
-      //chnWrite(pChnCOM, (const uint8_t *)&msgCOM, TELEMETRY_MSG_COM_HDR_SIZE);
-    } else {
-      fIQReset = TRUE;
-    }
-    break;
-  case 's': /* Streaming data enable (0x73 hex; 115 dec). */
-    if (msgUSB.data_size == 0) {
-      streamingCnt = STREAMING_COUNTER_VALUE;
+      msgUSB.data_size = sizeof(fPIDInvertErr);
+      chnWrite(pChnUSB, (const uint8_t *)&msgUSB, TELEMETRY_MSG_USB_HDR_SIZE);
+      chnWrite(pChnUSB, (const uint8_t *)&fPIDInvertErr, msgUSB.data_size);
     } else {
       fIQReset = TRUE;
     }
@@ -693,9 +564,8 @@ static void commandProcessUSB(void)
  * Application entry point (normal priority).
  */
 int main(void) {
-  uint_fast8_t loopDiv = 1;
-  uint16_t utmp16 = 0;
   thread_t *pThdBlinker;
+  thread_t *pThdWorker;
 
   /* System initializations.
    * - HAL initialization, this also initializes the configured device drivers
@@ -709,7 +579,7 @@ int main(void) {
   /* Initializes a serial-over-USB CDC driver. */
   sduObjectInit(&SDU1);
   sduStart(&SDU1, &serusbcfg);
-  
+
   /* Activates the pair of ADC1 and ADC2 drivers. */
   adcStart(&ADCD1, NULL);
 
@@ -727,59 +597,43 @@ int main(void) {
 
   /* Reset the AD5761R high voltage bipollar DAC device. */
   ad5761rStop();
-  chThdSleepMilliseconds(500);
-  
+  chThdSleepMilliseconds(100);
+
   /* Activates the AD5761R high voltage bipollar DAC device. */
   ad5761rStart();
   ad5761rSetData(0x0000);
-  
+
   /* Creates the blinker thread. */
   pThdBlinker = chThdCreateStatic(waBlinker, sizeof(waBlinker),
     LOWPRIO, Blinker, NULL);
 
-  /* Starts an ADC continuous conversion.
-   * If software trigger is enabled conversion starts immediately.
-   * If hardware trigger is enabled ADC waits until hardware trigger event occurs.
-   */
-  adcStartConversion(&ADCD1, &adcgrpcfg1, samplesCBAD, ADC_GRP1_BUF_DEPTH);
+  /* Creates the worker thread. */
+  pThdWorker = chThdCreateStatic(waWorker, sizeof(waWorker),
+    HIGHPRIO, Worker, NULL);
+
+  /* Starts an ADC continuous conversion. */
+  adcStartConversion(&ADCD1, &adcgrpcfg1, samplesBCDA, ADC_CIRC_BUF_DEPTH);
 
   /* Normal main() thread activity. */
   while (fRunMain) {
-    /* If ADC_BUF_DEPTH = 32 and sampling rate is 14 658 sps
-     * the invoking rate of the thread is ~458 Hz.
-     */
-    if (chBSemWaitTimeout(&bsemADCReady, MS2ST(ADC_WAIT_TIMEOUT_MS)) == MSG_OK) {
-      adcProcessData();
+    if (chBSemWaitTimeout(&bsemStreamReady, MS2ST(STREAM_WAIT_TIMEOUT_MS)) == MSG_OK) {
 
       /* Check if USB is connected and configured. */
       pChnUSB = serusbcfg.usbp->state == USB_ACTIVE ? (BaseChannel *)&SDU1 : NULL;
 
       if (pChnUSB) {
-        if (streamingCnt) {
+        if (fStreamingData) {
           /* Send message header and data. */
           msgUSB.msg_id    = 's';
-          msgUSB.data_size = ADC_BUF_DEPTH * sizeof(uint16_t);
+          msgUSB.data_size = STREAMING_BUF_DEPTH * sizeof(uint16_t);
 
           chnWrite(pChnUSB, (const uint8_t *)&msgUSB, TELEMETRY_MSG_USB_HDR_SIZE);
           chnWrite(pChnUSB, (const uint8_t *)streamingBuf, msgUSB.data_size);
-
-          streamingCnt--; /* Decrease streaming counter. */
         }
 
-        if (fPIDEnabled) {
-          msgUSB.msg_id    = 'c';
-          msgUSB.data_size = sizeof(utmp16);
-          utmp16 = ad5761rGetData();
-          chnWrite(pChnUSB, (const uint8_t *)&msgUSB, TELEMETRY_MSG_USB_HDR_SIZE);
-          chnWrite(pChnUSB, (const uint8_t *)&utmp16, msgUSB.data_size);
-        }
-
-        /* Run command processor @ ~92 Hz speed. */
-        if (loopDiv++ > (TELEMETRY_LOOP_DIV - 1)) {
-          if (commandGetUSB()) {
-            commandProcessUSB();
-          }
-          loopDiv = 1;
+        /* Run command processor. */
+        if (commandGetUSB()) {
+          commandProcessUSB();
         }
       }
     } else {
@@ -790,20 +644,22 @@ int main(void) {
         if (commandGetUSB()) {
           commandProcessUSB();
         }
-
-        loopDiv = 1;
       }
     }
   }
 
   /* Starting the shut-down sequence.*/
-  adcStopConversion(&ADCD1);          /* Stopping ADC1_2 conversions.             */
+  if (pThdWorker != NULL) {
+    chThdTerminate(pThdWorker);      /* Requesting termination.                  */
+    chThdWait(pThdWorker);           /* Waiting for the actual termination.      */
+  }
 
   if (pThdBlinker != NULL) {
     chThdTerminate(pThdBlinker);      /* Requesting termination.                  */
     chThdWait(pThdBlinker);           /* Waiting for the actual termination.      */
   }
 
+  adcStopConversion(&ADCD1);          /* Stopping ADC1_2 conversions.             */
   adcStop(&ADCD1);                    /* Stopping ADC1_2 device.                  */
   ad5761rStop();                      /* Powering down AD5761R high voltage DAC.  */
   spiStop(&SPID1);                    /* Stopping SPI1 device.                    */
